@@ -4,6 +4,9 @@ import io
 import numpy as np
 import librosa
 import requests
+import tempfile
+import subprocess
+import soundfile as sf
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -35,14 +38,44 @@ class VoiceRequest(BaseModel):
 # ---------------- AUDIO HELPERS ----------------
 def decode_base64_mp3(b64: str, target_sr=16000, max_sec=6.0):
     raw = base64.b64decode(b64)
-    y, _ = librosa.load(io.BytesIO(raw), sr=target_sr, mono=True)
 
+    # 1) Save MP3 to temp file
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f_in:
+        f_in.write(raw)
+        in_path = f_in.name
+
+    # 2) Convert MP3 -> WAV (16k mono) using ffmpeg
+    out_path = in_path.replace(".mp3", ".wav")
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", in_path,
+        "-ac", "1",
+        "-ar", str(target_sr),
+        out_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+    # 3) Read wav safely
+    y, sr = sf.read(out_path, dtype="float32")
+    if y.ndim > 1:
+        y = y[:, 0]
+
+    # cleanup
+    try:
+        os.remove(in_path)
+        os.remove(out_path)
+    except:
+        pass
+
+    # pad/trim to fixed length
     max_len = int(target_sr * max_sec)
     if len(y) > max_len:
         y = y[:max_len]
     else:
         y = np.pad(y, (0, max_len - len(y)))
+
     return y, target_sr
+
 
 def fetch_audio_url(url: str, timeout=20, max_bytes=3_000_000):
     """
@@ -183,3 +216,4 @@ def voice_detection(req: VoiceRequest, x_api_key: str = Header(None)):
             "status": "error",
             "message": msg
         })
+
